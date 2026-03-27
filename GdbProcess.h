@@ -34,7 +34,9 @@ public:
 
     void start();
     void sendCommand(int token, const QString& command);
+    void stop();
 
+    static void log(const QByteArray &title, const QString& arg);
 signals:
     // Emitted when GDB outputs stream text (e.g. console prints)
     void consoleStreamReceived(const QString& text);
@@ -45,6 +47,8 @@ signals:
     // Emitted when a command completes (done, error, running)
     void resultRecordReceived(int token, const QString& record);
 
+    // Emitted when output from the target application without '@' prefix arrives
+    void targetOutputReceived(const QString& text);
 private slots:
     void onReadyReadStandardOutput();
     void onReadyReadStandardError();

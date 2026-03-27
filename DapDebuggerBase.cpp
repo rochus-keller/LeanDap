@@ -70,14 +70,42 @@ bool DebuggerBase::suspend()
 
 bool DebuggerBase::addBreakpoint(const QString& file, int line)
 {
-    m_breakpoints[file].insert(line);
-    return syncBreakpoints(file);
+     m_breakpoints[file].insert(line);
+
+     if (isOpen()) {
+         return syncBreakpoints(file);
+     }
+     return true; // Saved to memory, will sync on open()
 }
 
 bool DebuggerBase::removeBreakpoint(const QString& file, int line)
 {
     m_breakpoints[file].remove(line);
-    return syncBreakpoints(file);
+
+    if (isOpen()) {
+        return syncBreakpoints(file);
+    }
+    return true;
+}
+
+bool DebuggerBase::addBreakpoint(const QString &functionName)
+{
+    m_functionBreakpoints.insert(functionName);
+
+    if (isOpen()) {
+        return syncFunctionBreakpoints();
+    }
+    return true; // Saved to memory, will sync on open()
+}
+
+bool DebuggerBase::removeBreakpoint(const QString &functionName)
+{
+    m_functionBreakpoints.remove(functionName);
+
+    if (isOpen()) {
+        return syncFunctionBreakpoints();
+    }
+    return true;
 }
 
 bool DebuggerBase::clearAllBreakpoints()
@@ -85,8 +113,14 @@ bool DebuggerBase::clearAllBreakpoints()
     QStringList files = m_breakpoints.keys();
     m_breakpoints.clear();
     bool ok = true;
-    for (int i = 0; i < files.size(); ++i) {
-        ok &= syncBreakpoints(files[i]);
+    if (isOpen()) {
+        for (int i = 0; i < files.size(); ++i) {
+            ok &= syncBreakpoints(files[i]);
+        }
+    }
+    m_functionBreakpoints.clear();
+    if (isOpen()) {
+        ok &= syncFunctionBreakpoints();
     }
     return ok;
 }
@@ -123,6 +157,14 @@ QList<Frame> DebuggerBase::getStack(int threadId)
     return result;
 }
 
+/* DAP variable hierarchy:
+    Thread (e.g., Thread 1)
+    Stack Frame (e.g., main() is Frame 0, CalculateFibonacci() is Frame 1)
+    Scope (e.g., "Locals", "Globals", "Registers")
+    Variable (e.g., int x = 5;)
+    Child Variable (e.g., p1.health = 100;)
+    */
+
 QList<Variable> DebuggerBase::getVariables(int frameId, int variablesReference)
 {
     QList<Variable> result;
@@ -131,10 +173,12 @@ QList<Variable> DebuggerBase::getVariables(int frameId, int variablesReference)
     // If variablesReference == 0, we need to ask for the scopes of the frame first to get the Locals ID
     if (targetRef == 0) {
         QJsonObject scopesRes = sendAndWait("scopes", QJsonObject{{"frameId", frameId}});
-        if (!scopesRes.value("success").toBool()) return result;
+        if (!scopesRes.value("success").toBool())
+            return result;
 
         QJsonArray scopes = scopesRes.value("body").toObject().value("scopes").toArray();
-        if (scopes.isEmpty()) return result;
+        if (scopes.isEmpty())
+            return result;
 
         targetRef = scopes[0].toObject().value("variablesReference").toInt();
     }
@@ -174,6 +218,22 @@ bool DebuggerBase::syncBreakpoints(const QString& file)
     return res.value("success").toBool();
 }
 
+bool DebuggerBase::syncFunctionBreakpoints()
+{
+    QJsonArray bpArray;
+    foreach (const QString& funcName, m_functionBreakpoints) {
+        QJsonObject bp;
+        bp.insert("name", funcName);
+        bpArray.append(bp);
+    }
+
+    QJsonObject args;
+    args.insert("breakpoints", bpArray);
+
+    QJsonObject res = sendAndWait("setFunctionBreakpoints", args);
+    return res.value("success").toBool();
+}
+
 int DebuggerBase::sendRequestAsync(const QString& command, const QJsonObject& arguments)
 {
     int seq = m_sequence++;
@@ -185,7 +245,7 @@ int DebuggerBase::sendRequestAsync(const QString& command, const QJsonObject& ar
         request.insert("arguments", arguments);
     }
 
-    // Hand off to the subclass (External or Integrated) to actually send it!
+    // Hand off to the subclass (External or Integrated) to actually send it
     transmitRequest(request);
 
     return seq;
@@ -211,6 +271,7 @@ QJsonObject DebuggerBase::sendAndWait(const QString& command, const QJsonObject&
     if (m_pendingResponses.contains(seq)) {
         return m_pendingResponses.take(seq);
     }
+    qCritical() << "DebuggerBase::sendAndWait timeout on" << command;
     return QJsonObject(); // Timeout or error
 }
 
@@ -227,18 +288,44 @@ void DebuggerBase::handleIncomingMessage(const QJsonObject& msg)
         DebuggerEvent evt;
 
         if (evtName == "stopped") {
-            evt.kind = DebuggerEvent::TARGET_STOPPED;
+            evt.kind = DebuggerEvent::Stopped;
             evt.threadId = msg.value("body").toObject().value("threadId").toInt();
             evt.reason = msg.value("body").toObject().value("reason").toString();
             emit sigEvent(evt);
         } else if (evtName == "continued") {
-            evt.kind = DebuggerEvent::TARGET_RUNNING;
+            evt.kind = DebuggerEvent::Continued;
             emit sigEvent(evt);
-        } else if (evtName == "exited" || evtName == "terminated") {
-            evt.kind = DebuggerEvent::TARGET_EXITED;
+        } else if (evtName == "terminated") {
+            evt.kind = DebuggerEvent::Finished;
             emit sigEvent(evt);
+        } else if (evtName == "exited") {
+            const int exitCode = msg.value("body").toObject().value("exitCode").toInt();
+#if 0
+            DebuggerEvent logEvt;
+            logEvt.kind = DebuggerEvent::TargetOutput;
+            logEvt.message = QString("Target exited with code %1").arg(exitCode);
+            emit sigEvent(logEvt);
+#else
+            evt.kind = DebuggerEvent::Exited;
+            evt.reason = QString::number(exitCode);
+            emit sigEvent(evt);
+#endif
         } else if (evtName == "initialized") {
-            // Tell the UI we are ready to set breakpoints!
+            evt.kind = DebuggerEvent::Initialized;
+            emit sigEvent(evt);
+        }else if (evtName == "output") {
+#if 0
+            evt.kind = DebuggerEvent::TargetOutput;
+            evt.message = msg.value("body").toObject().value("output").toString();
+            emit sigEvent(evt);
+#else
+            const QString cat = msg.value("body").toObject().value("category").toString();
+            const QString txt = msg.value("body").toObject().value("output").toString();
+            if( cat == "stdout" )
+                emit sigLog(txt);
+            else if ( cat == "console" )
+                qDebug() << "GDB console" << txt.trimmed().toUtf8().constData();
+#endif
         }
     }
 }

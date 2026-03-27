@@ -27,14 +27,16 @@
 #include <QRegExp>
 #include <QStringList>
 
-AdapterCore::AdapterCore(QObject *parent)
-    : QObject(parent),
+AdapterCore::AdapterCore(QObject *parent, bool standalone)
+    : QObject(parent),m_standalone(standalone),
       m_sequence(1), m_gdbTokenSeq(1),
-      m_nextVarRef(65536)
+      m_nextVarRef(65536), m_breakAtStart(false)
 {
     m_gdb = new GdbProcess(this);
     connect(m_gdb, SIGNAL(resultRecordReceived(int,QString)), this, SLOT(handleGdbResult(int,QString)));
     connect(m_gdb, SIGNAL(asyncRecordReceived(char,QString)), this, SLOT(handleGdbAsync(char,QString)));
+    connect(m_gdb, SIGNAL(targetOutputReceived(QString)), this, SLOT(handleTargetOutput(QString)));
+    connect(m_gdb, SIGNAL(consoleStreamReceived(QString)), this, SLOT(handleConsoleStream(QString)));
 }
 
 void AdapterCore::start()
@@ -110,7 +112,10 @@ void AdapterCore::handleDapRequest(const QJsonObject& message)
     }
     else if (command == "disconnect") {
         sendDapResponse(message, true);
-        QCoreApplication::quit();
+        if( m_standalone )
+            QCoreApplication::quit();
+        else
+            m_gdb->stop();
     }
     else if (command == "threads") {
         processThreads(message);
@@ -124,6 +129,9 @@ void AdapterCore::handleDapRequest(const QJsonObject& message)
     else if (command == "variables") {
         processVariables(message);
     }
+    else if (command == "setFunctionBreakpoints") {
+        processSetFunctionBreakpoints(message);
+    }
     else {
         sendDapResponse(message, true);
     }
@@ -133,6 +141,9 @@ void AdapterCore::processLaunch(const QJsonObject& message)
 {
     QJsonObject args = message.value("arguments").toObject();
     QString program = args.value("program").toString();
+
+    // Check if the IDE requested us to stop at the entry point
+    m_breakAtStart = args.value("stopAtEntry").toBool(false);
 
     // Load the binary, but DO NOT run it yet.
     m_gdb->sendCommand(-1, "-file-exec-and-symbols \"" + program + "\"");
@@ -174,11 +185,11 @@ void AdapterCore::processSetBreakpoints(const QJsonObject& message)
 
 void AdapterCore::processConfigurationDone(const QJsonObject& message)
 {
-    // The IDE is done setting up. NOW we run the program!
+    // The IDE is done setting up. Now we run the program
     int token = m_gdbTokenSeq++;
     m_pendingRequests.insert(token, message);
 
-    m_gdb->sendCommand(token, "-exec-run");
+    m_gdb->sendCommand(token, QString("-exec-run %1").arg(m_breakAtStart ? "--start": ""));
 }
 
 void AdapterCore::processExecCommand(const QJsonObject& message, const QString& miCommand)
@@ -191,13 +202,31 @@ void AdapterCore::processExecCommand(const QJsonObject& message, const QString& 
 
 void AdapterCore::handleGdbResult(int token, const QString& record)
 {
-    qDebug() << "GDB Result [" << token << "] >" << record;
+    GdbProcess::log("GDB Result [" + QByteArray::number(token) + "] >", record);
+
+    if (record.startsWith("error")) {
+        QString errMsg = extractMiValue(record, "msg");
+
+        // Tell the IDE the target is actually stopped due to an error
+        QJsonObject body;
+        body.insert("reason", "exception"); // "exception" forces IDEs to pay attention
+        body.insert("text", errMsg);
+        body.insert("threadId", 1);
+        body.insert("allThreadsStopped", true);
+        sendDapEvent("stopped", body);
+
+        // Print the error to the IDE console in red
+        QJsonObject outBody;
+        outBody.insert("category", "stderr");
+        outBody.insert("output", "GDB Execution Error: " + errMsg + "\n");
+        sendDapEvent("output", outBody);
+    }
 
     if (m_pendingRequests.contains(token)) {
         QJsonObject originalRequest = m_pendingRequests.take(token);
         QString command = originalRequest.value("command").toString();
 
-        if (command == "launch" || command == "continue" || command == "next" || command == "stepIn") {
+        if (command == "launch" || command == "continue" || command == "next" || command == "stepIn" || command == "stepOut") {
             bool success = record.startsWith("running") || record.startsWith("done");
             sendDapResponse(originalRequest, success);
         }
@@ -307,29 +336,44 @@ void AdapterCore::handleGdbResult(int token, const QString& record)
 
 void AdapterCore::handleGdbAsync(char type, const QString& record)
 {
-    qDebug() << "GDB Async (" << type << ") >" << record;
+    GdbProcess::log("GDB Async (" + QByteArray(1,type) + ") >", record);
 
     if (type == '*' && record.startsWith("stopped")) {
-        QJsonObject body;
 
         m_varNodes.clear();
         m_nextVarRef = 65536;
 
-        // Parse MI string to determine if we hit a breakpoint or stepped
+        // Check if the program exited
+        if (record.contains("reason=\"exited\"") ||
+                record.contains("reason=\"exited-normally\"") ||
+                record.contains("reason=\"exited-signalled\""))
+        {
+            QJsonObject body;
+            QString exitCodeStr = extractMiValue(record, "exit-code");
+
+            if (!exitCodeStr.isEmpty()) {
+                // "01" will be parsed as 1
+                body.insert("exitCode", exitCodeStr.toInt());
+            }
+
+            // DAP requires two events for a clean shutdown:
+            sendDapEvent("exited", body);       // Tells the IDE the exit code
+            sendDapEvent("terminated", QJsonObject()); // Tells the IDE the debug session is over
+
+            return; // Return early so we don't send a "stopped" event
+        }
+
+        // Otherwise, the program merely paused (Breakpoint, Step, etc.)
+        QJsonObject body;
         if (record.contains("reason=\"breakpoint-hit\"")) {
             body.insert("reason", "breakpoint");
         } else if (record.contains("reason=\"end-stepping-range\"") || record.contains("reason=\"function-finished\"")) {
             body.insert("reason", "step");
-        } else if (record.contains("reason=\"exited")) {
-            // Program finished naturally
-            sendDapEvent("exited", QJsonObject());
-            sendDapEvent("terminated", QJsonObject());
-            return;
         } else {
             body.insert("reason", "pause");
         }
 
-        body.insert("threadId", 1); // Hardcoded thread 1 for leandap
+        body.insert("threadId", 1);
         body.insert("allThreadsStopped", true);
         sendDapEvent("stopped", body);
     }
@@ -372,16 +416,21 @@ void AdapterCore::processScopes(const QJsonObject& message)
 {
     // A scope is a container for variables. We will return one "Locals" container.
     QJsonObject args = message.value("arguments").toObject();
+
+    // The IDE asks for a specific frame (e.g., 0 for the top frame)
     int frameId = args.value("frameId").toInt();
 
     QJsonArray scopes;
     QJsonObject locals;
     locals.insert("name", "Locals");
     locals.insert("presentationHint", "locals");
-    // DAP uses variablesReference to look up variables later.
+
+    // We map Frame 0 -> 1000, Frame 1 -> 1001, etc.
     // We generate a dummy ID based on the frame ID.
+    // This exact number is how processVariables knows which frame to switch to later
     locals.insert("variablesReference", 1000 + frameId);
     locals.insert("expensive", false);
+
     scopes.append(locals);
 
     QJsonObject body;
@@ -397,17 +446,20 @@ void AdapterCore::processVariables(const QJsonObject& message)
     int token = m_gdbTokenSeq++;
     m_pendingRequests.insert(token, message);
 
+    // If the reference is between 1000 and 1999, it is a FRAME LOCALS request
     if (ref >= 1000 && ref < 2000) {
-        // frame locals request (ref = 1000 + frameId)
+
+        // Extract the frame ID (e.g., 1001 -> Frame 1)
         int frameId = ref - 1000;
 
-        // Command 1: Switch GDB to the requested frame (Discard the response)
+        // Tell GDB to switch to that frame. (We send -1 because we don't care about the response).
         m_gdb->sendCommand(-1, QString("-stack-select-frame %1").arg(frameId));
 
-        // Command 2: Get all locals and their values. (Using 2 instead of --simple-values)
+        // Ask GDB for all locals in that frame (2 means "names and values", instead of --simple-values)
         m_gdb->sendCommand(token, "-stack-list-variables 2");
     }
-    else if (ref >= 2000) {
+    // If the reference is >= 65536, it is a COMPLEX VARIABLE (struct/array) expansion
+    else if (ref >= 65536) {
         // structured variable expansion
         if (!m_varNodes.contains(ref)) {
             sendDapResponse(message, true, QJsonObject());
@@ -416,10 +468,10 @@ void AdapterCore::processVariables(const QJsonObject& message)
 
         VarNode node = m_varNodes[ref];
 
-        // Command 1: Switch GDB to the frame where this variable exists
+        // Switch GDB to the frame where this variable exists
         m_gdb->sendCommand(-1, QString("-stack-select-frame %1").arg(node.frameId));
 
-        // Command 2: Lazy Creation! If GDB doesn't know about this object yet, create it.
+        // Lazy Creation. If GDB doesn't know about this object yet, create it.
         if (node.gdbVarObjName.isEmpty()) {
             QString varName = QString("var_%1").arg(ref);
             m_gdb->sendCommand(-1, QString("-var-create %1 * %2").arg(varName).arg(node.expression));
@@ -427,7 +479,82 @@ void AdapterCore::processVariables(const QJsonObject& message)
             node.gdbVarObjName = varName;
         }
 
-        // Command 3: Ask GDB for the struct/array children
+        // Ask GDB for the struct/array children
         m_gdb->sendCommand(token, QString("-var-list-children --all-values %1").arg(node.gdbVarObjName));
     }
+    else {
+        // Unknown reference, return empty
+        sendDapResponse(message, true, QJsonObject());
+    }
+}
+
+void AdapterCore::processSetFunctionBreakpoints(const QJsonObject &message)
+{
+    QJsonObject args = message.value("arguments").toObject();
+    QJsonArray breakpoints = args.value("breakpoints").toArray();
+
+    // Note: A full DAP implementation would clear previously set function
+    // breakpoints here before setting the new ones.
+
+    QJsonArray responseBreakpoints;
+
+    for (int i = 0; i < breakpoints.size(); ++i) {
+        QJsonObject bp = breakpoints[i].toObject();
+        QString funcName = bp.value("name").toString();
+
+        // Tell GDB to set the breakpoint by function name
+        // -f forces it as a pending breakpoint if the symbol isn't loaded yet
+        QString miCmd = QString("-break-insert -f %1").arg(funcName);
+        m_gdb->sendCommand(-1, miCmd);
+
+        // Acknowledge to the IDE that the breakpoint was accepted
+        QJsonObject respBp;
+        respBp.insert("verified", true);
+        // Note: We don't know the exact line number until GDB hits it,
+        // so we just return verified=true for now.
+        responseBreakpoints.append(respBp);
+    }
+
+    QJsonObject body;
+    body.insert("breakpoints", responseBreakpoints);
+    sendDapResponse(message, true, body);
+}
+
+void AdapterCore::handleTargetOutput(const QString& text)
+{
+    QJsonObject body;
+    body.insert("category", "stdout");
+    body.insert("output", text);
+
+    // Emit the standard DAP output event
+    sendDapEvent("output", body);
+}
+
+QString AdapterCore::unescapeGdbString(const QString& str)
+{
+    QString res = str;
+
+    // Remove surrounding quotes if they exist
+    if (res.startsWith('"') && res.endsWith('"')) {
+        res = res.mid(1, res.length() - 2);
+    }
+
+    // Unescape common C-string characters
+    res.replace("\\n", "\n");
+    res.replace("\\t", "\t");
+    res.replace("\\r", "\r");
+    res.replace("\\\"", "\"");
+    res.replace("\\\\", "\\");
+
+    return res;
+}
+
+void AdapterCore::handleConsoleStream(const QString& text)
+{
+    QJsonObject body;
+    body.insert("category", "console");
+    body.insert("output", unescapeGdbString(text));
+
+    // Send it through the exact same DAP output event
+    sendDapEvent("output", body);
 }

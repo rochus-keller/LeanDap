@@ -35,11 +35,12 @@ namespace Dap {
         ~DebuggerInt();
 
         // adapterPath is ignored here
-        bool open(const QString& programPath, const QString& adapterPath = QString());
+        bool open(const QString& programPath, bool stopAtEntry = false);
         void close();
+        bool isOpen() const;
 
     protected:
-        void transmitRequest(const QJsonObject& request); // Calls m_adapter->handleDapRequest() directly!
+        void transmitRequest(const QJsonObject& request); // Calls m_adapter->handleDapRequest() directly
 
     private slots:
         void onAdapterMessage(const QJsonObject& message); // Just forwards to handleIncomingMessage()

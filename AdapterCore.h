@@ -38,7 +38,7 @@ class AdapterCore : public QObject
     Q_OBJECT
 
 public:
-    explicit AdapterCore(QObject *parent = 0);
+    explicit AdapterCore(QObject *parent = 0, bool standalone = true);
     void start();
 
 public slots:
@@ -50,8 +50,11 @@ signals:
 private slots:
     void handleGdbResult(int token, const QString& record);
     void handleGdbAsync(char type, const QString& record);
+    void handleTargetOutput(const QString& text);
+    void handleConsoleStream(const QString& text);
 
 private:
+    QString unescapeGdbString(const QString& str);
     void processLaunch(const QJsonObject& message);
     void processSetBreakpoints(const QJsonObject& message);
     void processConfigurationDone(const QJsonObject& message);
@@ -62,6 +65,7 @@ private:
     void processStackTrace(const QJsonObject& message);
     void processScopes(const QJsonObject& message);
     void processVariables(const QJsonObject& message);
+    void processSetFunctionBreakpoints(const QJsonObject& message);
 
     // extract values from GDB MI strings (e.g. extracting "main" from func="main")
     QString extractMiValue(const QString& miStr, const QString& key);
@@ -71,6 +75,8 @@ private:
     int m_sequence;
     int m_gdbTokenSeq;
     int m_nextVarRef;
+    bool m_standalone;
+    bool m_breakAtStart;
     QMap<int, VarNode> m_varNodes;
 
     // GDB Token -> original DAP Request that triggered it

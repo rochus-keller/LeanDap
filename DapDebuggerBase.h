@@ -30,16 +30,16 @@ namespace Dap {
     struct DebuggerEvent
     {
         enum EventKind { 
-            TARGET_STOPPED = 0, 
-            TARGET_RUNNING, 
-            TARGET_EXITED, 
-            LOG_MESSAGE 
+            Initialized,
+            Stopped,
+            Continued,
+            Exited, // target application exited
+            Finished, // debug session finished
         };
 
         EventKind kind;
         int threadId;
-        QString reason; // "breakpoint", "step", etc.
-        QString message; // For logs
+        QString reason; // "breakpoint", "step", exit code, etc.
     };
 
     struct Frame
@@ -65,8 +65,7 @@ namespace Dap {
         explicit DebuggerBase(QObject *parent = 0);
         virtual ~DebuggerBase();
 
-        virtual bool open(const QString& programPath, const QString& adapterPath = QString()) = 0;
-        virtual void close() = 0;
+        virtual bool isOpen() const = 0;
 
         bool resume();
         bool stepIn(int threadId = 1);
@@ -76,6 +75,8 @@ namespace Dap {
 
         bool addBreakpoint(const QString& file, int line);
         bool removeBreakpoint(const QString& file, int line);
+        bool addBreakpoint(const QString& function);
+        bool removeBreakpoint(const QString& funciton);
         bool clearAllBreakpoints();
 
         QList<int> allThreads();
@@ -85,6 +86,7 @@ namespace Dap {
     signals:
         void sigError(const QString& msg);
         void sigEvent(const Dap::DebuggerEvent& event);
+        void sigLog(const QString& msg);
 
     protected slots:
         // subclasses will funnel received JSON responses into this slot
@@ -101,9 +103,10 @@ namespace Dap {
         int m_sequence;
         QHash<int, QJsonObject> m_pendingResponses;
         QHash<QString, QSet<int> > m_breakpoints;
+        QSet<QString> m_functionBreakpoints;
 
-    private:
         bool syncBreakpoints(const QString& file);
+        bool syncFunctionBreakpoints();
     };
 }
 Q_DECLARE_METATYPE(Dap::DebuggerEvent)

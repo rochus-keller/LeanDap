@@ -61,45 +61,68 @@ void GdbProcess::sendCommand(int token, const QString& command)
         fullCommand = command;
     }
 
-    qDebug() << "GDB <" << fullCommand;
+    log("GDB <", fullCommand);
     QByteArray cmd = fullCommand.toUtf8() + "\n";
     m_process->write(cmd);
 }
 
+void GdbProcess::stop()
+{
+    if( !m_process->isOpen() || m_process->state() == QProcess::NotRunning )
+    {
+        qDebug() << "GDB already finished!";
+        return;
+    }
+
+    m_process->terminate();
+    if( !m_process->waitForFinished() )
+        qDebug() << "Failed to finish GDB!";
+}
+
+void GdbProcess::log(const QByteArray& title, const QString &arg)
+{
+    const int len = 50;
+    QByteArray msg = arg.toUtf8();
+    msg.replace("\\\"", "\"");
+    qDebug() << title.constData() << msg.left(len).constData() << (msg.size() > len ? "..." : "");
+}
+
 void GdbProcess::processMiLine(const QString& line)
 {
-    if (line == "(gdb)") return;
+    if (line == "(gdb)")
+        return;
 
-    // Extract the token if it exists (e.g. "123^done" -> token 123, prefix '^', payload "done")
     int i = 0;
-    while (i < line.length() && line.at(i).isDigit()) {
+    while (i < line.length() && line.at(i).isDigit())
         i++;
+
+    // Check if the character after the numbers is a known GDB/MI prefix
+    if (i < line.length()) {
+        QChar prefix = line.at(i);
+        QString payload = line.mid(i + 1);
+        int token = (i > 0) ? line.left(i).toInt() : -1;
+
+        switch (prefix.toLatin1()) {
+            case '^':
+                emit resultRecordReceived(token, payload);
+                return; // done
+            case '*': case '+': case '=':
+                emit asyncRecordReceived(prefix.toLatin1(), payload);
+                return;
+            case '~':
+                return; // ignore: the textual output that GDB would normally print to the screen if a human were typing in the standard GDB CLI.
+            case '@': // supposed to be the stdout/stderr of the target application (seems to just include a new line)
+                return;
+            case '&': // GDB's internal warning and error channel.
+                emit consoleStreamReceived(payload);
+                return;
+        }
     }
 
-    if (i == line.length()) return; // Malformed line
-
-    int token = -1;
-    if (i > 0) {
-        token = line.left(i).toInt();
-    }
-
-    QChar prefix = line.at(i);
-    QString payload = line.mid(i + 1);
-
-    switch (prefix.toLatin1()) {
-        case '^': // Result record
-            emit resultRecordReceived(token, payload);
-            break;
-        case '*': case '+': case '=': // Async records
-            emit asyncRecordReceived(prefix.toLatin1(), payload);
-            break;
-        case '~': case '@': case '&': // Stream records
-            emit consoleStreamReceived(payload);
-            break;
-        default:
-            qDebug() << "Unknown MI Line:" << line;
-            break;
-    }
+    // If we reach this point, the line did not match ANY standard GDB prefix.
+    // So we assume it is raw output the target application's printf
+    // re-add \n which was removed before
+    emit targetOutputReceived(line + "\n");
 }
 
 void GdbProcess::onReadyReadStandardOutput()

@@ -23,12 +23,12 @@ using namespace Dap;
 
 DebuggerInt::DebuggerInt(QObject *parent)
     : DebuggerBase(parent),
-      m_adapter(new AdapterCore(this)) // Instantiate the core in-memory!
+      m_adapter(new AdapterCore(this, false))
 {
     // Wire the signals from AdapterCore to our local slots
     connect(m_adapter, SIGNAL(transmitMessage(QJsonObject)), this, SLOT(onAdapterMessage(QJsonObject)));
 
-    connect(m_adapter, SIGNAL(logEmitted(QString)), this, SLOT(onAdapterLog(QString)));
+    // TODO connect(m_adapter, SIGNAL(logEmitted(QString)), this, SLOT(onAdapterLog(QString)));
 }
 
 DebuggerInt::~DebuggerInt()
@@ -43,12 +43,9 @@ void DebuggerInt::transmitRequest(const QJsonObject& request)
     }
 }
 
-bool DebuggerInt::open(const QString& programPath, const QString& adapterPath)
+bool DebuggerInt::open(const QString& programPath, bool stopAtEntry)
 {
-    Q_UNUSED(adapterPath); // Ignored in integrated mode!
-
     // Reset base class state
-    m_breakpoints.clear();
     m_pendingResponses.clear();
     m_sequence = 1;
 
@@ -65,6 +62,7 @@ bool DebuggerInt::open(const QString& programPath, const QString& adapterPath)
     // Launch the target
     QJsonObject launchArgs;
     launchArgs.insert("program", programPath);
+    launchArgs.insert("stopAtEntry", stopAtEntry); // Tell the adapter to pause
     QJsonObject launchRes = sendAndWait("launch", launchArgs);
 
     if (launchRes.isEmpty() || !launchRes.value("success").toBool()) {
@@ -72,8 +70,15 @@ bool DebuggerInt::open(const QString& programPath, const QString& adapterPath)
         return false;
     }
 
+    QStringList files = m_breakpoints.keys();
+    for (int i = 0; i < files.size(); ++i) {
+        syncBreakpoints(files[i]);
+    }
+    syncFunctionBreakpoints();
+
     // Configuration Done (Tells GDB to execute the binary)
-    sendAndWait("configurationDone");
+    // doesn't return til timeout: sendAndWait("configurationDone");
+    sendRequestAsync("configurationDone");
 
     return true;
 }
@@ -87,20 +92,21 @@ void DebuggerInt::close()
     }
 }
 
+bool DebuggerInt::isOpen() const
+{
+    // If we have an adapter and the sequence is > 1, we are running
+    return m_adapter != 0 && m_sequence > 1;
+}
+
 void DebuggerInt::onAdapterMessage(const QJsonObject& message)
 {
     // The adapter has generated a DAP JSON object (Response or Event).
-    // We simply hand it directly to the base class routing engine!
+    // We simply hand it directly to the base class routing engine
     handleIncomingMessage(message);
 }
 
 void DebuggerInt::onAdapterLog(const QString& message)
 {
     // Route stderr from GDB (or internal adapter logs) to the IDE UI.
-    Dap::DebuggerEvent evt;
-    evt.kind = Dap::DebuggerEvent::LOG_MESSAGE;
-    evt.message = message;
-
-    // Emit the signal defined in DapDebuggerBase
-    emit sigEvent(evt);
+    emit sigLog(message);
 }
