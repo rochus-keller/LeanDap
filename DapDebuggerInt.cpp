@@ -43,7 +43,7 @@ void DebuggerInt::transmitRequest(const QJsonObject& request)
     }
 }
 
-bool DebuggerInt::open(const QString& programPath, bool stopAtEntry)
+bool DebuggerInt::open(const QString& programPath, const QStringList &args, bool stopAtEntry)
 {
     // Reset base class state
     m_pendingResponses.clear();
@@ -63,6 +63,15 @@ bool DebuggerInt::open(const QString& programPath, bool stopAtEntry)
     QJsonObject launchArgs;
     launchArgs.insert("program", programPath);
     launchArgs.insert("stopAtEntry", stopAtEntry); // Tell the adapter to pause
+
+    if (!args.isEmpty()) {
+        QJsonArray argsArray;
+        for (int i = 0; i < args.size(); ++i) {
+            argsArray.append(args[i]);
+        }
+        launchArgs.insert("args", argsArray);
+    }
+
     QJsonObject launchRes = sendAndWait("launch", launchArgs);
 
     if (launchRes.isEmpty() || !launchRes.value("success").toBool()) {

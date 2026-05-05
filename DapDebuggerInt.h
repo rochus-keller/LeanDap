@@ -35,7 +35,7 @@ namespace Dap {
         ~DebuggerInt();
 
         // adapterPath is ignored here
-        bool open(const QString& programPath, bool stopAtEntry = false);
+        bool open(const QString& programPath, const QStringList& args = QStringList(), bool stopAtEntry = false);
         void close();
         bool isOpen() const;
 

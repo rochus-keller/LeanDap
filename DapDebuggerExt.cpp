@@ -41,7 +41,7 @@ DebuggerExt::~DebuggerExt()
     close();
 }
 
-bool DebuggerExt::open(const QString& programPath, const QString& adapterPath, bool stopAtEntry)
+bool DebuggerExt::open(const QString& programPath, const QString& adapterPath, const QStringList &args, bool stopAtEntry)
 {
     m_buffer.clear();
     m_expectedContentLength = 0;
@@ -61,6 +61,15 @@ bool DebuggerExt::open(const QString& programPath, const QString& adapterPath, b
     QJsonObject launchArgs;
     launchArgs.insert("program", programPath);
     launchArgs.insert("stopAtEntry", stopAtEntry); // Tell the adapter to pause
+    
+    if (!args.isEmpty()) {
+        QJsonArray argsArray;
+        for (int i = 0; i < args.size(); ++i) {
+            argsArray.append(args[i]);
+        }
+        launchArgs.insert("args", argsArray);
+    }
+
     QJsonObject launchRes = sendAndWait("launch", launchArgs);
     if (launchRes.isEmpty() || !launchRes.value("success").toBool()) return false;
 

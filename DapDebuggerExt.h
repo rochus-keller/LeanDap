@@ -33,7 +33,7 @@ namespace Dap {
         explicit DebuggerExt(QObject *parent = 0);
         ~DebuggerExt();
 
-        bool open(const QString& programPath, const QString& adapterPath = QString(), bool stopAtEntry = false);
+        bool open(const QString& programPath, const QString& adapterPath = QString(), const QStringList& args = QStringList(), bool stopAtEntry = false);
         void close();
         bool isOpen() const;
 

@@ -148,6 +148,25 @@ void AdapterCore::processLaunch(const QJsonObject& message)
     // Load the binary, but DO NOT run it yet.
     m_gdb->sendCommand(-1, "-file-exec-and-symbols \"" + program + "\"");
 
+    if (args.contains("args")) {
+        QJsonArray argsArray = args.value("args").toArray();
+        if (!argsArray.isEmpty()) {
+            QString gdbArgsStr;
+            for (int i = 0; i < argsArray.size(); ++i) {
+                QString arg = argsArray[i].toString();
+
+                // Escape any internal quotes (e.g. --name="John Doe" -> --name=\"John Doe\")
+                arg.replace("\"", "\\\"");
+
+                // Wrap every argument in quotes and separate by spaces
+                gdbArgsStr += " \"" + arg + "\"";
+            }
+
+            // Send the command: -exec-arguments "arg1" "arg2"
+            m_gdb->sendCommand(-1, "-exec-arguments" + gdbArgsStr);
+        }
+    }
+
     // Acknowledge launch immediately. The IDE will now send setBreakpoints.
     sendDapResponse(message, true);
 }
